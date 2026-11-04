@@ -2,6 +2,8 @@ from datetime import timezone
 
 from google.protobuf.message import DecodeError
 from redis import RedisError
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 from redis.sentinel import Sentinel
 
 from common.logs import log
@@ -16,9 +18,10 @@ class FlightCache:
             addresses,
             socket_timeout=0.3,
             socket_connect_timeout=0.3,
-            sentinel_kwargs={"socket_timeout": 0.3, "socket_connect_timeout": 0.3},
+            retry=Retry(NoBackoff(), 0),
+            sentinel_kwargs={"socket_timeout": 0.3, "socket_connect_timeout": 0.3, "retry": Retry(NoBackoff(), 0)},
         )
-        self.client = self.sentinel.master_for(master_name, socket_timeout=0.3, socket_connect_timeout=0.3)
+        self.client = self.sentinel.master_for(master_name, socket_timeout=0.3, socket_connect_timeout=0.3, retry=Retry(NoBackoff(), 0))
         self.ttl = ttl
 
     def get(self, key, version, message_type):
