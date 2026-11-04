@@ -154,7 +154,7 @@ services:
   tests:
     <<: *app
     profiles: [test]
-    command: [pytest, -q, tests]
+    command: [pytest, -q, -o, cache_dir=/tmp/pytest-cache, tests]
     environment:
       FLIGHT_DATABASE_URL: postgresql+psycopg://flights:${FLIGHT_DB_PASSWORD:-local-flights}@flight-db:5432/flights
       BOOKING_DATABASE_URL: postgresql+psycopg://bookings:${BOOKING_DB_PASSWORD:-local-bookings}@booking-db:5432/bookings
