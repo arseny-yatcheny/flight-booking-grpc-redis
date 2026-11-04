@@ -1,0 +1,168 @@
+x-app: &app
+  image: ${APP_IMAGE:-flight-booking:local}
+  build: .
+
+x-sentinel: &sentinel
+  image: redis:7.4.6-alpine
+  entrypoint: [sh, /etc/start-sentinel.sh]
+  volumes:
+    - ./redis/start-sentinel.sh:/etc/start-sentinel.sh:ro
+  depends_on:
+    redis-master:
+      condition: service_healthy
+    redis-replica:
+      condition: service_healthy
+  healthcheck:
+    test: [CMD, redis-cli, -p, '26379', ping]
+    interval: 2s
+    timeout: 2s
+    retries: 30
+
+services:
+  flight-db:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: flights
+      POSTGRES_USER: flights
+      POSTGRES_PASSWORD: ${FLIGHT_DB_PASSWORD:-local-flights}
+    volumes:
+      - flight-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U flights -d flights]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  booking-db:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: bookings
+      POSTGRES_USER: bookings
+      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD:-local-bookings}
+    volumes:
+      - booking-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U bookings -d bookings]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  flight-migrate:
+    image: redgate/flyway:11.13.2-alpine
+    depends_on:
+      flight-db:
+        condition: service_healthy
+    command: -connectRetries=30 migrate
+    environment:
+      FLYWAY_URL: jdbc:postgresql://flight-db:5432/flights
+      FLYWAY_USER: flights
+      FLYWAY_PASSWORD: ${FLIGHT_DB_PASSWORD:-local-flights}
+    volumes:
+      - ./migrations/flight:/flyway/sql:ro
+
+  booking-migrate:
+    image: redgate/flyway:11.13.2-alpine
+    depends_on:
+      booking-db:
+        condition: service_healthy
+    command: -connectRetries=30 migrate
+    environment:
+      FLYWAY_URL: jdbc:postgresql://booking-db:5432/bookings
+      FLYWAY_USER: bookings
+      FLYWAY_PASSWORD: ${BOOKING_DB_PASSWORD:-local-bookings}
+    volumes:
+      - ./migrations/booking:/flyway/sql:ro
+
+  redis-master:
+    image: redis:7.4.6-alpine
+    command: [redis-server, --save, '', --appendonly, 'no', --protected-mode, 'no']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redis-replica:
+    image: redis:7.4.6-alpine
+    command: [redis-server, --replicaof, redis-master, '6379', --save, '', --appendonly, 'no', --protected-mode, 'no']
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  sentinel-1:
+    <<: *sentinel
+  sentinel-2:
+    <<: *sentinel
+  sentinel-3:
+    <<: *sentinel
+
+  flight:
+    <<: *app
+    command: [python, -m, flight.main]
+    depends_on:
+      flight-migrate:
+        condition: service_completed_successfully
+      sentinel-1:
+        condition: service_healthy
+      sentinel-2:
+        condition: service_healthy
+      sentinel-3:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://flights:${FLIGHT_DB_PASSWORD:-local-flights}@flight-db:5432/flights
+      GRPC_API_KEY: ${GRPC_API_KEY:-local-flight-service-key}
+      REDIS_SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+      REDIS_MASTER_NAME: flights
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-600}
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 50051), timeout=2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  booking:
+    <<: *app
+    depends_on:
+      booking-migrate:
+        condition: service_completed_successfully
+      flight:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://bookings:${BOOKING_DB_PASSWORD:-local-bookings}@booking-db:5432/bookings
+      GRPC_API_KEY: ${GRPC_API_KEY:-local-flight-service-key}
+      FLIGHT_GRPC_TARGET: flight:50051
+      GRPC_MAX_ATTEMPTS: ${GRPC_MAX_ATTEMPTS:-3}
+      GRPC_RETRY_BACKOFF: ${GRPC_RETRY_BACKOFF:-0.1}
+      GRPC_TIMEOUT_SECONDS: ${GRPC_TIMEOUT_SECONDS:-2}
+      CB_FAILURE_THRESHOLD: ${CB_FAILURE_THRESHOLD:-5}
+      CB_RESET_TIMEOUT: ${CB_RESET_TIMEOUT:-10}
+      CB_WINDOW_SECONDS: ${CB_WINDOW_SECONDS:-30}
+      RECOVERY_INTERVAL_SECONDS: ${RECOVERY_INTERVAL_SECONDS:-2}
+    ports:
+      - '127.0.0.1:${API_PORT:-8000}:8000'
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  tests:
+    <<: *app
+    profiles: [test]
+    command: [pytest, -q, tests]
+    environment:
+      FLIGHT_DATABASE_URL: postgresql+psycopg://flights:${FLIGHT_DB_PASSWORD:-local-flights}@flight-db:5432/flights
+      BOOKING_DATABASE_URL: postgresql+psycopg://bookings:${BOOKING_DB_PASSWORD:-local-bookings}@booking-db:5432/bookings
+      GRPC_API_KEY: ${GRPC_API_KEY:-local-flight-service-key}
+      FLIGHT_GRPC_TARGET: flight:50051
+      BOOKING_URL: http://booking:8000
+      REDIS_SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+
+volumes:
+  flight-data:
+  booking-data:

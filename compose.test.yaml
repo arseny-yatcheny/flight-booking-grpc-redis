@@ -1,0 +1,5 @@
+services:
+  booking:
+    ports: !reset []
+    environment:
+      RECOVERY_INTERVAL_SECONDS: '3600'
